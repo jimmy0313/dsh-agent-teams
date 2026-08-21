@@ -61,6 +61,7 @@ import { memberArtUrl } from '../lib/client/artwork.js'
 import { parseAgentTeamsCreateArgs } from '../lib/client/agent-teams-card-definition.js'
 import { openAgentTeamMember } from '../lib/client/session-navigation.js'
 import { shouldAdoptLoadedSettings } from '../lib/client/settings-monitor.js'
+import { openAgentTeamMember } from '../lib/client/session-navigation.js'
 import { steerCaptainReport } from '../lib/tools.js'
 import {
   installMemberSelectionRuntime,

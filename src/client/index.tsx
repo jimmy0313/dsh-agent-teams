@@ -16,6 +16,7 @@ import { AgentTeamsCard, type AgentTeamsCardInjected } from './AgentTeamsCard.ts
 import { agentTeamsCardDefinition } from './agent-teams-card-definition.ts'
 import { openAgentTeamMember } from './session-navigation.ts'
 import { SettingsPanel } from './SettingsPanel.tsx'
+import { openAgentTeamMember } from './session-navigation.ts'
 
 /** Required services: conversation nodes, slots, and sessions navigation. */
 export const inject = ['conversationEvents', 'slots', 'sessions']
