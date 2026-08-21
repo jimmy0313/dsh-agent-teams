@@ -13,7 +13,7 @@
  * @module dsh-agent-teams/client/settings
  */
 
-import { useEffect, useState, useSyncExternalStore } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: pulls the settings.section slot declaration into this program.
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -21,6 +21,7 @@ import {
   getSettingsSnapshot,
   loadSettings,
   saveSettings,
+  shouldAdoptLoadedSettings,
   subscribeSettings,
   type MemberModelSettings,
   type RoleSettings,
@@ -174,12 +175,29 @@ export function SettingsPanel(_props: PropsRuntime<'settings.section'>) {
   const [draft, setDraft] = useState<RuntimeSettings>(state.settings)
   const [localError, setLocalError] = useState('')
   const [newRole, setNewRole] = useState('')
+  // The draft initializes from the pre-load snapshot, which is empty on a
+  // fresh page. Once the async load lands, adopt the persisted settings into
+  // the form exactly once — without this the panel always opens blank and a
+  // save silently overwrites the settings file with the empty draft.
+  const hydrated = useRef(false)
 
   // The section mounts when the Settings panel opens it; load once so the
   // catalog (providers/models/efforts) and persisted settings are fresh.
   useEffect(() => {
     if (!state.loaded && !state.loading) void loadSettings()
   }, [state.loaded, state.loading])
+
+  // Hydrate the form from the loaded settings. Marking hydration complete as
+  // soon as the load lands — even when the draft is kept because the user
+  // already started editing — closes the window where a later 清空表单 could
+  // otherwise resurrect the persisted values.
+  useEffect(() => {
+    if (!state.loaded || hydrated.current) return
+    hydrated.current = true
+    if (shouldAdoptLoadedSettings(state.loaded, false, draft)) {
+      setDraft(state.settings)
+    }
+  }, [state.loaded, state.settings, draft])
 
   const setMemberModel = (next: MemberModelSettings): void => {
     setDraft((previous) => {

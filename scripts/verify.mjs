@@ -60,6 +60,7 @@ import {
 import { memberArtUrl } from '../lib/client/artwork.js'
 import { parseAgentTeamsCreateArgs } from '../lib/client/agent-teams-card-definition.js'
 import { openAgentTeamMember } from '../lib/client/session-navigation.js'
+import { shouldAdoptLoadedSettings } from '../lib/client/settings-monitor.js'
 import { steerCaptainReport } from '../lib/tools.js'
 import {
   installMemberSelectionRuntime,
@@ -1388,6 +1389,22 @@ try {
   check(
     'settings read returns empty defaults for a missing file',
     Object.keys(await readSettingsFile(join(settingsRoot, 'missing.json'))).length === 0,
+  )
+
+  // Regression: the settings panel initializes its draft from the pre-load
+  // snapshot (empty on a fresh page). Once the async load lands it must adopt
+  // the persisted settings into the form — otherwise the panel opens blank and
+  // a save overwrites settings.json with the empty draft, silently dropping
+  // the global default (memberModel) and every other persisted value.
+  check(
+    'settings panel adopts persisted settings once the fresh load lands',
+    shouldAdoptLoadedSettings(true, false, {}) === true,
+  )
+  check(
+    'settings panel never adopts after hydration, before load, or over user edits',
+    shouldAdoptLoadedSettings(true, true, {}) === false
+      && shouldAdoptLoadedSettings(false, false, {}) === false
+      && shouldAdoptLoadedSettings(true, false, { memberModel: { model: 'x' } }) === false,
   )
 
   const fakeCtx = {

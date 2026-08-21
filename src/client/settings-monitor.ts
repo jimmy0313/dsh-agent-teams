@@ -184,6 +184,22 @@ export async function saveSettings(
   }
 }
 
+/**
+ * Decide whether a freshly loaded settings snapshot should replace the form
+ * draft. The panel initializes its draft from the pre-load snapshot (empty on
+ * a fresh page), so once the async load lands it must adopt the persisted
+ * settings — otherwise the form opens blank and the next save overwrites the
+ * settings file with an empty payload. It must never clobber edits the user
+ * already made before the load completed.
+ */
+export function shouldAdoptLoadedSettings(
+  loaded: boolean,
+  hydrated: boolean,
+  draft: RuntimeSettings,
+): boolean {
+  return loaded && !hydrated && Object.keys(draft).length === 0
+}
+
 /** Reset the in-memory store (test isolation). */
 export function resetSettingsState(): void {
   publish(EMPTY_STATE)
