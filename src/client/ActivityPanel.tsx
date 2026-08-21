@@ -202,7 +202,7 @@ function memberStatusText(member: ActivityMember, tasks: readonly ActivityTask[]
     if (dependency !== undefined) return `等待 ${dependency.id} · ${dependency.assignee || '待认领'}`
     return '等待前置任务'
   }
-  if (member.total === 0) return '等待队长派工'
+  if (member.total === 0) return '等待组织者派工'
   if (member.done === member.total) return '任务已交付'
   return member.activity === 'idle' ? '待继续执行' : '状态未知'
 }
@@ -218,7 +218,7 @@ function taskSummary(team: ActivityTeam): string {
   const running = team.tasks.filter((task) => task.state === 'running')
   const blocked = team.tasks.filter((task) => task.state === 'blocked')
   const ready = team.tasks.filter((task) => task.state === 'open' && task.status !== 'completed')
-  if (team.tasks.length === 0) return '等待队长拆解任务'
+  if (team.tasks.length === 0) return '等待组织者拆解任务'
   if (completed.length === team.tasks.length) return `全部 ${completed.length} 项任务已交付`
   if (blocked.length > 0 && running.length > 0) {
     return `${blocked.slice(0, 3).map((task) => task.id).join('、')}${blocked.length > 3 ? ` 等 ${blocked.length} 项` : ''} 等待前置，其余已开工`
@@ -402,14 +402,14 @@ function TeamSection({ team, onNavigate, historic = false }: {
         </span>
       </header>
 
-      <section className={css.delegationSection} aria-label="队长派工关系" data-delegation-map>
+      <section className={css.delegationSection} aria-label="组织者派工关系" data-delegation-map>
         <div className={css.captainNode}>
           <span className={css.captainAvatar}>
             <img className={css.leadAvatar} src={LEAD_ART} alt="" aria-hidden />
           </span>
           <span className={css.captainInfo}>
             <span className={css.captainLine}>
-              <span className={css.captainName}>队长</span>
+              <span className={css.captainName}>组织者</span>
               <span className={css.captainRole}>拆解 · 派发 · 汇总</span>
             </span>
             <span className={css.captainSummary}>已派发 {assignedCount} 项任务给 {team.members.length} 名成员</span>
@@ -428,7 +428,7 @@ function TeamSection({ team, onNavigate, historic = false }: {
         </button>
 
         {membersOpen && <div className={css.delegationTree}>
-          {team.members.length === 0 && <span className={css.emptyHint}>暂无成员，等待队长组建团队</span>}
+          {team.members.length === 0 && <span className={css.emptyHint}>暂无成员，等待组织者组建团队</span>}
           {team.members.map((member) => {
             const owned = team.tasks.filter((task) => task.assignee === member.name)
             return (
@@ -466,7 +466,7 @@ function TeamSection({ team, onNavigate, historic = false }: {
                   <span className={css.memberCount}>{member.done}/{member.total}</span>
                 </button>
                 <div className={css.assignmentLine}>
-                  <span className={css.assignmentLabel}>队长派发</span>
+                  <span className={css.assignmentLabel}>组织者派发</span>
                   <span className={css.assignmentTasks}>
                     {owned.length === 0
                       ? <span className={css.taskEmpty}>暂无任务</span>

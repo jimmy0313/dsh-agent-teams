@@ -1,0 +1,262 @@
+/* AgentTeams「子代理设置」page inside the sidebar Settings panel. Shares the
+   DSH design-token bridge used by the activity panel so all surfaces stay
+   on-theme. The host Settings shell owns the page chrome (nav, header, close);
+   this file styles only the page content. */
+
+.page {
+  --dsw-alias-line-normal: var(--dsw-static-neutral-bluish-150, #e7e9ee);
+  --dsw-alias-line-strong: color-mix(
+    in srgb,
+    var(--dsw-static-neutral-bluish-200, #e1e5ee) 50%,
+    var(--dsw-static-neutral-bluish-300, #cfd3d6)
+  );
+  --dsw-alias-bg-module: var(--dsw-alias-bg-layer-1, #ffffff);
+  --dsw-alias-bg-fill-neutral: var(--dsw-static-neutral-bluish-100, #eef0f4);
+  --dsw-alias-bg-fill-business: var(--dsw-alias-state-business-primary, #4d6bfe);
+  --dsw-alias-state-danger: var(--dsw-alias-state-error-primary, #e5484d);
+  --dsw-alias-label-on-fill: var(--dsw-alias-label-primary-inverted, #ffffff);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+}
+
+.select:focus-visible,
+.input:focus-visible,
+.textarea:focus-visible,
+.roleNameInput:focus-visible,
+.primaryButton:focus-visible,
+.secondaryButton:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 2px;
+}
+
+.hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--dsw-alias-line-normal);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--dsw-alias-bg-module) 96%, transparent);
+}
+
+.sectionHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sectionTitle {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--dsw-alias-label-primary);
+}
+
+.sectionHint {
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.label {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.select,
+.input,
+.textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0 10px;
+  border: 1px solid var(--dsw-alias-line-normal);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-module);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+  transition: border-color 120ms ease;
+}
+
+.select,
+.input {
+  height: 32px;
+  line-height: 30px;
+}
+
+.textarea {
+  min-height: 48px;
+  padding: 6px 10px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.select:hover,
+.input:hover,
+.textarea:hover {
+  border-color: var(--dsw-alias-line-strong);
+}
+
+.fieldError {
+  border-color: var(--dsw-alias-state-danger);
+}
+
+/* role catalog */
+.roleBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--dsw-alias-line-normal);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-module);
+}
+
+.roleHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.roleName {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+
+.roleNameInput {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--dsw-alias-line-normal);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-module);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.roleNameInput:hover {
+  border-color: var(--dsw-alias-line-strong);
+}
+
+.roleKey {
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.removeButton {
+  margin-left: auto;
+  padding: 2px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: color 120ms ease, background-color 120ms ease;
+}
+
+.removeButton:hover {
+  color: var(--dsw-alias-state-danger);
+  background: color-mix(in srgb, var(--dsw-alias-state-danger) 10%, transparent);
+}
+
+.removeButton:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 1px;
+}
+
+.addRoleRow {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.addRoleRow .input {
+  flex: 1;
+}
+
+.addRoleRow .secondaryButton {
+  flex-shrink: 0;
+}
+
+/* numeric caps */
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cell:last-child {
+  grid-column: 1 / -1;
+}
+
+.error {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--dsw-alias-state-danger);
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.primaryButton,
+.secondaryButton {
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 120ms ease, border-color 120ms ease;
+}
+
+.primaryButton {
+  border: 1px solid transparent;
+  background: var(--dsw-alias-bg-fill-business);
+  color: var(--dsw-alias-label-on-fill);
+}
+
+.secondaryButton {
+  border: 1px solid var(--dsw-alias-line-normal);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.primaryButton:hover,
+.secondaryButton:hover {
+  border-color: var(--dsw-alias-line-strong);
+}
+
+.primaryButton:disabled,
+.secondaryButton:disabled {
+  opacity: 0.55;
+  cursor: default;
+}

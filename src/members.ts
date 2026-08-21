@@ -58,6 +58,8 @@ export interface MemberLlmSelection {
   model: string
   /** Adapter-owned reasoning effort, absent when the target has no explicit/default effort. */
   reasoningEffort?: string
+  /** Per-member request output cap applied at fresh spawn; not cold-resumed. */
+  maxTokens?: number
 }
 
 /** Optional member-level route requested by the captain. */
@@ -68,8 +70,14 @@ export interface MemberLlmSelectionRequest {
   model?: string
   /** Plugin-level member model default. */
   defaultModel?: string
+  /** Settings-panel provider default (paired with `defaultModel` when set). */
+  defaultProvider?: string
   /** Explicit reasoning effort; "default" selects the target model's default effort. */
   reasoningEffort?: string
+  /** Settings-panel reasoning-effort default applied when no explicit effort is given. */
+  defaultReasoningEffort?: string
+  /** Optional per-member request output cap (settings panel). */
+  maxTokens?: number
 }
 
 /** Process-local bridge between spawn admission and synchronous child setup. */
@@ -130,7 +138,9 @@ export async function resolveMemberLlmSelection(
   const explicitProvider = request.provider?.trim()
   const explicitModel = request.model?.trim()
   const defaultModel = request.defaultModel?.trim()
+  const defaultProvider = request.defaultProvider?.trim()
   const explicitEffort = request.reasoningEffort?.trim()
+  const defaultEffort = request.defaultReasoningEffort?.trim()
   if (request.provider !== undefined && explicitProvider === '') {
     throw new Error('member LLM provider must not be empty')
   }
@@ -140,8 +150,18 @@ export async function resolveMemberLlmSelection(
   if (request.defaultModel !== undefined && defaultModel === '') {
     throw new Error('configured memberModel must not be empty')
   }
+  if (request.defaultProvider !== undefined && defaultProvider === '') {
+    throw new Error('settings member provider must not be empty')
+  }
   if (request.reasoningEffort !== undefined && explicitEffort === '') {
     throw new Error('member reasoning effort must not be empty')
+  }
+  if (request.defaultReasoningEffort !== undefined && defaultEffort === '') {
+    throw new Error('settings member reasoning effort must not be empty')
+  }
+  if (request.maxTokens !== undefined
+    && (!Number.isSafeInteger(request.maxTokens) || request.maxTokens <= 0)) {
+    throw new Error('member maxTokens must be a positive integer')
   }
   if (explicitProvider !== undefined && explicitModel === undefined) {
     throw new Error('an explicit member LLM provider requires an explicit member model')
@@ -150,7 +170,7 @@ export async function resolveMemberLlmSelection(
   const current = captain.session.requestHeader()?.config
   const currentProvider = current?.provider ?? captain.options.provider
   const currentModel = current?.model ?? captain.options.model
-  const provider = explicitProvider ?? currentProvider
+  const provider = explicitProvider ?? defaultProvider ?? currentProvider
   const model = explicitModel ?? defaultModel ?? currentModel
   if (provider === undefined || model === undefined) {
     throw new Error('cannot resolve the member LLM route from the current captain session')
@@ -159,15 +179,21 @@ export async function resolveMemberLlmSelection(
   // Effort ids belong to one exact provider/model capability. Preserve the
   // captain's effort only on the same route; a changed route must resolve its
   // own default. Explicit effort still wins, while "default" forces that
-  // target-default behavior even when the route did not change.
+  // target-default behavior even when the route did not change. The settings
+  // panel default sits between the two: it overrides captain inheritance but
+  // yields to a per-member tool argument.
   const sameRoute = provider === currentProvider && model === currentModel
-  const reasoningEffort = explicitEffort === undefined
-    ? sameRoute
-      ? current?.reasoningEffort
-      : undefined
-    : explicitEffort === 'default'
+  const reasoningEffort = explicitEffort !== undefined
+    ? explicitEffort === 'default'
       ? undefined
       : ReasoningEffortId(explicitEffort)
+    : defaultEffort !== undefined
+      ? defaultEffort === 'default'
+        ? undefined
+        : ReasoningEffortId(defaultEffort)
+      : sameRoute
+        ? current?.reasoningEffort
+        : undefined
   const resolved = await ctx.llm.resolveCallConfig({
     provider,
     model,
@@ -181,6 +207,9 @@ export async function resolveMemberLlmSelection(
     ...resolved.reasoningEffort === undefined
       ? {}
       : { reasoningEffort: String(resolved.reasoningEffort) },
+    ...request.maxTokens === undefined
+      ? {}
+      : { maxTokens: request.maxTokens },
   }
 }
 
@@ -255,14 +284,27 @@ export function installMemberSelectionRuntime(ctx: Context, stateDir: string): M
 
 /**
  * The member's system prompt (persona), shadowing the deployment persona for
- * that child. Self-contained: it replaces the whole persona section.
+ * that child. Self-contained: it replaces the whole persona section. When the
+ * member's role has a configured definition (`roleDescription`, from the
+ * settings panel's role catalog), that persona is inserted as the role's
+ * working definition.
  * @param team - the team the member joined.
  * @param member - the member record (name/role are read before spawning).
  * @param stateDir - configured state directory, so the member can locate the
  *   team files with its own file tools.
+ * @param roleDescription - the matched role's persona/definition, when set.
  */
-export function memberPersona(team: TeamState, member: TeamMember, stateDir: string): string {
-  return `You are ${member.name}, a member of the multi-agent team "${team.name}" running inside DeepSeek Harness AgentTeams. The captain leads the team; you are a worker member${member.role ? ` with the role: ${member.role}` : ''}.
+export function memberPersona(
+  team: TeamState,
+  member: TeamMember,
+  stateDir: string,
+  roleDescription?: string,
+): string {
+  const roleLine = member.role ? ` with the role: ${member.role}` : ''
+  const definition = roleDescription !== undefined && roleDescription.trim() !== ''
+    ? `\n\nRole definition:\n${roleDescription.trim()}`
+    : ''
+  return `You are ${member.name}, a member of the multi-agent team "${team.name}" running inside DeepSeek Harness AgentTeams. The captain leads the team; you are a worker member${roleLine}.${definition}
 
 Team context:
 - Team id: ${team.id}
@@ -299,6 +341,8 @@ export function memberWelcome(team: TeamState): string {
  * @param team - the team record (read-only here).
  * @param member - the member draft whose `id` is filled on success.
  * @param stateDir - configured state directory (for the persona).
+ * @param rolePersona - matched role definition (persona) from the settings
+ *   panel, embedded in the member persona when set.
  * @param signal - caller cancellation, forwarded to the start.
  */
 export async function spawnMember(
@@ -311,6 +355,7 @@ export async function spawnMember(
   member: TeamMember,
   stateDir: string,
   signal: AbortSignal,
+  rolePersona?: string,
 ): Promise<void> {
   // Fail loud at the first use: provider registration is a sibling plugin's
   // effect and may settle after this plugin mounts. Capability checks here
@@ -339,11 +384,14 @@ export async function spawnMember(
       request: {
         prompt: [{ type: 'text', text: memberWelcome(team) }],
         parent: captain,
-        persona: memberPersona(team, member, stateDir),
+        persona: memberPersona(team, member, stateDir, rolePersona),
         toolFilter: { deny: [...MEMBER_DENIED_TOOLS] },
         agentOptions: {
           provider: llmSelection.provider,
           model: llmSelection.model,
+          ...llmSelection.maxTokens === undefined
+            ? {}
+            : { maxTokens: llmSelection.maxTokens },
         },
         ...config.maxDepth !== undefined ? { maxDepth: config.maxDepth } : {},
       },

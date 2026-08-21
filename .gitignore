@@ -3,3 +3,5 @@ lib/
 *.tsbuildinfo
 .DS_Store
 .agent-teams/
+.pnpm-store/
+.npm-cache/

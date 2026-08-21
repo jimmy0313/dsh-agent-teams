@@ -63,9 +63,20 @@ import { openAgentTeamMember } from '../lib/client/session-navigation.js'
 import { steerCaptainReport } from '../lib/tools.js'
 import {
   installMemberSelectionRuntime,
+  memberPersona,
   resolveMemberLlmSelection,
   spawnMember,
 } from '../lib/members.js'
+import {
+  buildSettingsCatalog,
+  matchRoleSettings,
+  parseSettings,
+  readSettingsFile,
+  readSettingsFileSync,
+  roleCatalog,
+  writeSettingsFile,
+} from '../lib/settings.js'
+import { ROLE_DEFINITIONS } from '../lib/roles.js'
 
 let failures = 0
 function check(label, condition, detail = '') {
@@ -819,6 +830,50 @@ try {
 }
 check('empty explicit reasoning effort is rejected', emptyEffortRejected)
 
+const settingsDefaultSelection = await resolveMemberLlmSelection(selectionContext, captain, {
+  defaultProvider: 'other-provider',
+  defaultModel: 'other-model',
+  defaultReasoningEffort: 'high',
+  maxTokens: 2048,
+})
+check(
+  'settings default route + effort apply and maxTokens rides through',
+  settingsDefaultSelection.provider === 'other-provider'
+    && settingsDefaultSelection.model === 'other-model'
+    && settingsDefaultSelection.reasoningEffort === 'high'
+    && settingsDefaultSelection.maxTokens === 2048,
+  `resolved ${settingsDefaultSelection.provider}/${settingsDefaultSelection.model} @ ${settingsDefaultSelection.reasoningEffort}, maxTokens ${settingsDefaultSelection.maxTokens}`,
+)
+const settingsDefaultSentinel = await resolveMemberLlmSelection(selectionContext, captain, {
+  defaultProvider: 'other-provider',
+  defaultModel: 'other-model',
+  defaultReasoningEffort: 'default',
+})
+check(
+  'settings default effort sentinel selects the target model default',
+  settingsDefaultSentinel.reasoningEffort === 'low'
+    && resolvedCalls.at(-1)?.reasoningEffort === undefined,
+  `resolved effort ${settingsDefaultSentinel.reasoningEffort}`,
+)
+const explicitOverSettingsDefault = await resolveMemberLlmSelection(selectionContext, captain, {
+  defaultProvider: 'other-provider',
+  defaultModel: 'other-model',
+  defaultReasoningEffort: 'high',
+  reasoningEffort: 'default',
+})
+check(
+  'explicit effort sentinel overrides the settings default effort',
+  explicitOverSettingsDefault.reasoningEffort === 'low',
+  `resolved effort ${explicitOverSettingsDefault.reasoningEffort}`,
+)
+let invalidMaxTokensRejected = false
+try {
+  await resolveMemberLlmSelection(selectionContext, captain, { maxTokens: 0 })
+} catch {
+  invalidMaxTokensRejected = true
+}
+check('non-positive member maxTokens is rejected', invalidMaxTokensRejected)
+
 let startSpec
 const spawnMemberRecord = {
   id: '',
@@ -1194,6 +1249,187 @@ try {
     await new Promise((resolve) => setTimeout(resolve, 500))
     await rm(atomicStateRoot, { recursive: true, force: true })
   })
+}
+
+console.log('settings panel store and model catalog')
+const settingsRoot = await mkdtemp(join(tmpdir(), 'dsh-agent-teams-settings-'))
+try {
+  const settingsFile = join(settingsRoot, 'settings.json')
+
+  check(
+    'settings parse rejects a provider without a model',
+    parseSettings({ memberModel: { provider: 'deepseek' } }) === undefined,
+  )
+  check(
+    'settings parse rejects a non-positive maxMembers',
+    parseSettings({ maxMembers: 0 }) === undefined,
+  )
+  check(
+    'settings parse rejects unknown nested shapes',
+    parseSettings({ memberModel: 3 }) === undefined,
+  )
+  const parsed = parseSettings({
+    memberModel: { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'low' },
+    roleModels: {
+      researcher: { model: 'cheap-model', reasoningEffort: 'low' },
+      reviewer: {},
+      qa: { provider: 'p2', model: 'qa-model' },
+      frontend: { name: '前端', description: '负责 UI 实现', model: 'ui-model' },
+    },
+    memberMaxTokens: 1000,
+    memberMaxDepth: 2,
+    maxMembers: 5,
+  })
+  check(
+    'settings parse normalizes a full valid payload',
+    parsed?.memberModel?.provider === 'deepseek'
+      && parsed?.memberModel?.model === 'deepseek-chat'
+      && parsed?.memberModel?.reasoningEffort === 'low'
+      && parsed?.roleModels?.researcher?.model === 'cheap-model'
+      && parsed?.roleModels?.reviewer?.model === undefined
+      && parsed?.roleModels?.qa?.provider === 'p2'
+      && parsed?.roleModels?.frontend?.name === '前端'
+      && parsed?.roleModels?.frontend?.description === '负责 UI 实现'
+      && parsed?.roleModels?.frontend?.model === 'ui-model'
+      && parsed?.memberMaxTokens === 1000
+      && parsed?.memberMaxDepth === 2
+      && parsed?.maxMembers === 5,
+  )
+  check(
+    'settings parse rejects a role route with a provider but no model',
+    parseSettings({ roleModels: { engineer: { provider: 'p1' } } }) === undefined,
+  )
+  check(
+    'settings parse rejects a role with an empty name',
+    parseSettings({ roleModels: { x: { name: '  ' } } }) === undefined,
+  )
+  check(
+    'settings parse rejects a malformed roleModels map',
+    parseSettings({ roleModels: 5 }) === undefined,
+  )
+
+  const roleSettings = {
+    memberModel: { model: 'global-model' },
+    roleModels: {
+      researcher: { model: 'cheap-model', reasoningEffort: 'low' },
+      qa: { model: 'qa-model' },
+      frontend: { model: 'ui-model' },
+      engineer: { model: 'eng-model' },
+    },
+  }
+  check(
+    'role matching picks the exact key first',
+    matchRoleSettings(roleSettings, 'researcher')?.model === 'cheap-model',
+  )
+  check(
+    'role matching finds a compound title by containment',
+    matchRoleSettings(roleSettings, 'QA Engineer')?.model === 'qa-model',
+  )
+  check(
+    'role matching prefers the longest matching key',
+    matchRoleSettings(roleSettings, 'Frontend Engineer')?.model === 'ui-model',
+  )
+  check(
+    'role matching is case/space tolerant',
+    matchRoleSettings(roleSettings, '  RESEARCHER ')?.model === 'cheap-model',
+  )
+  check(
+    'role matching returns undefined for unmatched or absent roles',
+    matchRoleSettings(roleSettings, 'data') === undefined
+      && matchRoleSettings(roleSettings, undefined) === undefined
+      && matchRoleSettings({}, 'researcher') === undefined,
+  )
+  check(
+    'unmatched roles fall back to the global default at the call site',
+    matchRoleSettings(roleSettings, 'data') === undefined,
+  )
+
+  const roleRows = roleCatalog({ roleModels: { frontend: {}, researcher: {} } })
+  check(
+    'role catalog merges built-in roles with custom keys',
+    roleRows.length === ROLE_DEFINITIONS.length + 1
+      && roleRows.filter((role) => role.builtin).length === ROLE_DEFINITIONS.length
+      && roleRows.some((role) => role.key === 'frontend' && !role.builtin)
+      && !roleRows.some((role) => role.key === 'researcher' && !role.builtin),
+  )
+  check(
+    'role catalog uses the custom role display name',
+    roleCatalog({ roleModels: { frontend: { name: '前端' } } })
+      .find((role) => role.key === 'frontend')?.name === '前端',
+  )
+
+  const personaTeam = {
+    name: 'Persona Team',
+    id: 'persona-team',
+    captainSessionId: 'captain-session',
+    createdAt: Date.now(),
+    members: [],
+    tasks: [],
+    taskSeq: 0,
+  }
+  const personaMember = { id: '', name: 'fe', role: 'frontend', joinedAt: Date.now(), status: 'idle' }
+  const withRolePersona = memberPersona(personaTeam, personaMember, '.agent-teams', '负责 UI 实现')
+  const withoutRolePersona = memberPersona(personaTeam, personaMember, '.agent-teams')
+  check(
+    'member persona embeds the matched role definition when present',
+    withRolePersona.includes('Role definition:\n负责 UI 实现')
+      && !withoutRolePersona.includes('Role definition:'),
+  )
+
+  await writeSettingsFile(settingsFile, parsed)
+  check(
+    'settings write/read round-trips through the atomic path',
+    (await readSettingsFile(settingsFile)).maxMembers === 5,
+  )
+  check(
+    'settings sync read matches the async read',
+    readSettingsFileSync(settingsFile).memberModel?.model === 'deepseek-chat',
+  )
+  check(
+    'settings read returns empty defaults for a missing file',
+    Object.keys(await readSettingsFile(join(settingsRoot, 'missing.json'))).length === 0,
+  )
+
+  const fakeCtx = {
+    llm: {
+      listProviders: () => [{ id: 'p1', name: 'Provider One' }, { id: 'p2', name: 'Provider Two' }],
+      listModels: (provider) => provider === 'p1'
+        ? [{ id: 'm1', name: 'Model One' }]
+        : [{ id: 'bad', name: 'Broken Model' }],
+      resolveModelInfo: (provider, model) => {
+        if (provider === 'p1' && model === 'm1') {
+          return {
+            provider, id: model, name: 'Model One',
+            reasoning: {
+              efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }],
+              defaultEffort: 'low',
+            },
+          }
+        }
+        throw new Error(`no such model ${provider}/${model}`)
+      },
+    },
+  }
+  const catalog = await buildSettingsCatalog(fakeCtx, { roleModels: { frontend: {} } })
+  check(
+    'settings catalog lists providers, models, efforts, and default effort',
+    catalog.providers.length === 2
+      && catalog.models['p1']?.length === 1
+      && catalog.efforts['p1/m1']?.length === 2
+      && catalog.defaultEfforts['p1/m1'] === 'low',
+  )
+  check(
+    'settings catalog keeps per-route resolution failures out of the way',
+    catalog.efforts['p2/bad'] === undefined
+      && catalog.effortErrors['p2/bad'] !== undefined,
+  )
+  check(
+    'settings catalog carries the role roster',
+    catalog.roles.length === ROLE_DEFINITIONS.length + 1
+      && catalog.roles.some((role) => role.key === 'frontend' && !role.builtin),
+  )
+} finally {
+  await rm(settingsRoot, { recursive: true, force: true })
 }
 
 if (failures > 0) {

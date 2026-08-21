@@ -270,8 +270,8 @@ session.append(type, data)   // type 必须已并入 SessionEventMap
   浏览器端 Conversation Node 会按 `seq` 确定性重放这些事件。
 - **event-types.ts 必须零 import**：它同时被 host 与 client 两个 program 加载；一旦 import 了
   host 侧包（如 `dsh-session` 的 index），client program 的声明合并就被污染（见 3.1/5.3）。
-- append 目标：把事件写进"队长会话"（而非调用者），成员操作也统一落回队长会话，保证单一监控面；
-  队长不可达时回退调用者会话。`session.append` 会抛，包一层 try/warn 降级。
+- append 目标：把事件写进"组织者会话"（而非调用者），成员操作也统一落回组织者会话，保证单一监控面；
+  组织者不可达时回退调用者会话。`session.append` 会抛，包一层 try/warn 降级。
 
 ## 3. client 侧开发
 

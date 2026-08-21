@@ -1,4 +1,5 @@
-/** Browser plugin for the AgentTeams activity floater and conversation card. */
+/** Browser plugin for the AgentTeams activity floater, conversation card, and
+ * the sidebar Settings「子代理设置」page. */
 
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 // Module-loading import: the card registers into the conversation chat-node
@@ -7,10 +8,14 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 // The frame-level overlay is declared by ui-layout. This import is type-only;
 // ctx.slots.inject below owns the runtime wait for the declaration.
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
+// Type-only: pulls the settings.section slot declaration (ui-settings) into
+// this program; the runtime wait is owned by ctx.slots.inject.
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { ActivityPanel } from './ActivityPanel.tsx'
 import { AgentTeamsCard, type AgentTeamsCardInjected } from './AgentTeamsCard.tsx'
 import { agentTeamsCardDefinition } from './agent-teams-card-definition.ts'
 import { openAgentTeamMember } from './session-navigation.ts'
+import { SettingsPanel } from './SettingsPanel.tsx'
 
 /** Required services: conversation nodes, slots, and sessions navigation. */
 export const inject = ['conversationEvents', 'slots', 'sessions']
@@ -41,6 +46,17 @@ export function apply(ctx: ClientContext): void {
     order: 80,
     label: 'AgentTeams activity',
   }, Panel))
+
+  // Sub-agent settings page inside the sidebar Settings panel: role catalog,
+  // per-role persona + model route, and cost caps. The page opens from the
+  // Settings trigger in the left sidebar (settings.trigger, owned by the
+  // settings shell); the data flows through the plugin's own routes/store.
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'agent-teams',
+    order: 30,
+    label: '子代理设置',
+  }, SettingsPanel))
 
   // The host command is only the slash-menu/admission surface. Its input is
   // replayed as the visible user message, so the generic result row would be

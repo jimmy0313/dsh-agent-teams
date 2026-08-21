@@ -50,6 +50,7 @@ import {
 } from './members.ts'
 import { TERMINAL_TASK_STATUSES, type TeamMember, type TeamState, type TeamTask } from './types.ts'
 import { installTeamScheduler } from './scheduler.ts'
+import { matchRoleSettings, type RuntimeSettings } from './settings.ts'
 
 /** Resolved plugin config consumed by the tools. */
 export interface ToolsConfig {
@@ -63,6 +64,22 @@ export interface ToolsConfig {
   memberMaxDepth?: number
   /** Team size cap (members). */
   maxMembers: number
+  /** Live runtime settings (settings panel), overriding the static config. */
+  getSettings?: () => RuntimeSettings
+}
+
+/** Effective member-knob snapshot: runtime settings override static config. */
+interface EffectiveConfig {
+  maxDepth?: number
+  maxMembers: number
+}
+
+function effectiveConfig(config: ToolsConfig): EffectiveConfig {
+  const settings = config.getSettings?.() ?? {}
+  return {
+    maxDepth: settings.memberMaxDepth ?? config.memberMaxDepth,
+    maxMembers: settings.maxMembers ?? config.maxMembers,
+  }
 }
 
 /** The caller agent, or a loud failure for non-agent callers. */
@@ -291,7 +308,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): void
 
   ctx.tools.register(defineTool({
     name: 'agent_teams_add_member',
-    description: 'Add a durable continuable member. By default it snapshots the captain\'s current LLM route and effort. Supply provider/model only for an explicitly requested role-specific route; a changed provider or model automatically uses the target model\'s default effort. Set reasoning_effort only to request one of the target model\'s supported ids explicitly (or "default" to force its default). The member waits for messages, works on assigned tasks, and can message the team.',
+    description: 'Add a durable continuable member. By default it snapshots the captain\'s current LLM route and effort, unless the settings panel defines a route for this member\'s role (role-matched route wins) or a global memberModel default. Supply provider/model only for an explicitly requested role-specific route; a changed provider or model automatically uses the target model\'s default effort. Set reasoning_effort only to request one of the target model\'s supported ids explicitly (or "default" to force its default). The member waits for messages, works on assigned tasks, and can message the team.',
     parameters: {
       name: { type: 'string', required: true, description: 'Unique member name inside the team.' },
       role: { type: 'string', description: 'Role of the member (e.g. researcher, engineer, reviewer).' },
@@ -333,14 +350,24 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): void
         if (fresh.members.some((candidate) => sanitizeKey(candidate.name) === memberKey)) {
           throw new Error(`member name "${args.name}" has already been used in team "${fresh.name}"`)
         }
-        if (fresh.members.filter((candidate) => candidate.status !== 'removed').length >= config.maxMembers) {
-          throw new Error(`team "${fresh.name}" is at its member cap (${config.maxMembers})`)
+        const effective = effectiveConfig(config)
+        if (fresh.members.filter((candidate) => candidate.status !== 'removed').length >= effective.maxMembers) {
+          throw new Error(`team "${fresh.name}" is at its member cap (${effective.maxMembers})`)
         }
+        const settings = config.getSettings?.() ?? {}
+        // Role-matched route wins over the global member default; both fall
+        // back to the static `memberModel` config and then the captain route.
+        const roleDefaults = args.role === undefined
+          ? undefined
+          : matchRoleSettings(settings, args.role)
         const selection = await resolveMemberLlmSelection(ctx, captain, {
           provider: args.provider,
           model: args.model,
-          defaultModel: config.memberModel,
+          defaultModel: roleDefaults?.model ?? settings.memberModel?.model ?? config.memberModel,
+          defaultProvider: roleDefaults?.provider ?? settings.memberModel?.provider,
           reasoningEffort: args.reasoning_effort,
+          defaultReasoningEffort: roleDefaults?.reasoningEffort ?? settings.memberModel?.reasoningEffort,
+          maxTokens: settings.memberMaxTokens,
         }, exec.signal)
         const member: TeamMember = {
           id: '',
@@ -362,6 +389,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): void
           member,
           config.stateDir,
           exec.signal,
+          roleDefaults?.description,
         )
         fresh.members.push(member)
         try {
@@ -1103,7 +1131,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): void
 function memberRuntime(config: ToolsConfig): MemberRuntimeConfig {
   return {
     provider: config.memberProvider,
-    maxDepth: config.memberMaxDepth,
+    maxDepth: effectiveConfig(config).maxDepth,
   }
 }
 

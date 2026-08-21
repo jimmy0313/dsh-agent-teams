@@ -31,6 +31,14 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { collectArchivedTeamsActivity, collectTeamsActivity } from './snapshot.ts'
+import {
+  buildSettingsCatalog,
+  defaultSettingsFile,
+  parseSettings,
+  readSettingsFileSync,
+  writeSettingsFile,
+  type RuntimeSettings,
+} from './settings.ts'
 
 /**
  * Structural slice of the web server service, compatible with both the
@@ -52,6 +60,25 @@ const WEB_SERVER_KEYS = ['webServer', 'httpServer'] as const
 /** Workspace registry service key candidates, newest first. */
 const WORKSPACE_KEYS = ['workspaceRegistry', 'workspace'] as const
 
+/** Read a request body up to `limit` bytes; rejects over-limit and mid-stream errors. */
+function readRequestBody(req: IncomingMessage, limit: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    let received = 0
+    req.on('data', (chunk: Buffer) => {
+      received += chunk.length
+      if (received > limit) {
+        reject(new Error('request body too large'))
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => { resolve(Buffer.concat(chunks).toString('utf8')) })
+    req.on('error', reject)
+  })
+}
+
 export const name = 'agent-teams'
 export const inject = ['tools', 'llm', 'subagents', 'systemPrompt', 'agents']
 
@@ -70,6 +97,8 @@ export interface Config {
   memberMaxDepth?: number
   /** Team size cap in members (default `8`). */
   maxMembers?: number
+  /** Absolute path of the runtime settings file behind the Web settings panel (default `~/.dsh/dsh-agent-teams/settings.json`). */
+  settingsFile?: string
   /** Prompt-section order for the usage policy (default `117`, after delegation policy). */
   promptSectionOrder?: number
   /**
@@ -86,6 +115,7 @@ export const Config: z<Config> = z.object({
   memberModel: z.string(),
   memberMaxDepth: z.natural().default(1),
   maxMembers: z.natural().min(1).default(8),
+  settingsFile: z.string(),
   promptSectionOrder: z.natural().default(117),
   slashCommand: z.boolean().default(true),
 })
@@ -105,12 +135,19 @@ Tools: ${toolNames}`
 }
 
 export function apply(ctx: Context, config: Config): void {
+  // Runtime settings: the Web panel reads/writes a JSON file so member model
+  // and cost knobs can change without editing the profile. Startup loads the
+  // file once; a settings PUT updates this in-memory copy and the file.
+  const settingsFile = config.settingsFile ?? defaultSettingsFile()
+  let runtimeSettings: RuntimeSettings = readSettingsFileSync(settingsFile)
+
   const resolved: ToolsConfig = {
     stateDir: config.stateDir ?? '.agent-teams',
     memberProvider: config.memberProvider ?? 'spawn',
     memberModel: config.memberModel,
     memberMaxDepth: config.memberMaxDepth ?? 1,
     maxMembers: config.maxMembers ?? 8,
+    getSettings: () => runtimeSettings,
   }
 
   // Provider registration is a sibling plugin's effect (`subagent-spawn` /
@@ -247,6 +284,75 @@ export function apply(ctx: Context, config: Config): void {
     if (WEB_SERVER_KEYS.includes(name as (typeof WEB_SERVER_KEYS)[number])
       || WORKSPACE_KEYS.includes(name as (typeof WORKSPACE_KEYS)[number])) {
       registerWebSurface()
+    }
+  })
+
+  // Settings panel routes: only the Web server is required (settings are
+  // global, not workspace-scoped). Registered lazily so a webless profile
+  // stays tool-only. The panel GETs the current settings plus a model catalog,
+  // and PUTs a validated settings object that the member spawn path reads.
+  let settingsRegistered = false
+  const registerSettingsRoutes = (): void => {
+    if (settingsRegistered) return
+    const webServer = (ctx.get(WEB_SERVER_KEYS[0]) ?? ctx.get(WEB_SERVER_KEYS[1])) as WebRouteHost | undefined
+    if (webServer === undefined) return
+    settingsRegistered = true
+
+    ctx.effect(() => webServer.register({
+      kind: 'exact',
+      path: '/plugins/dsh-agent-teams/settings',
+      handler: async (req, res) => {
+        if (req.method === 'GET') {
+          const body = JSON.stringify({
+            settings: runtimeSettings,
+            catalog: await buildSettingsCatalog(ctx, runtimeSettings),
+          })
+          res.writeHead(200, {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'no-store',
+          })
+          res.end(body)
+          return
+        }
+        if (req.method === 'PUT') {
+          try {
+            const raw = await readRequestBody(req, 64 * 1024)
+            const parsed: unknown = JSON.parse(raw)
+            const next = parseSettings(parsed)
+            if (next === undefined) {
+              res.writeHead(400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+              res.end(JSON.stringify({ error: 'invalid settings payload' }))
+              return
+            }
+            await writeSettingsFile(settingsFile, next)
+            runtimeSettings = next
+            res.writeHead(200, {
+              'content-type': 'application/json; charset=utf-8',
+              'cache-control': 'no-store',
+            })
+            res.end(JSON.stringify({ settings: next }))
+          } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : String(error)
+            if (error instanceof SyntaxError) {
+              res.writeHead(400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+            } else {
+              ctx.logger.warn(`agent-teams: settings write failed: ${message}`)
+              res.writeHead(500, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+            }
+            res.end(JSON.stringify({ error: message }))
+          }
+          return
+        }
+        res.writeHead(405, { allow: 'GET, PUT', 'cache-control': 'no-store' })
+        res.end()
+      },
+    }), 'agent-teams: settings route')
+  }
+
+  registerSettingsRoutes()
+  ctx.on('internal/service', (name) => {
+    if (WEB_SERVER_KEYS.includes(name as (typeof WEB_SERVER_KEYS)[number])) {
+      registerSettingsRoutes()
     }
   })
 }

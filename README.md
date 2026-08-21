@@ -118,11 +118,24 @@ Defaults work without extra setup. A trusted profile can override member behavio
     memberModel: deepseek-v4
     memberMaxDepth: 1
     maxMembers: 8
+    # settingsFile: ~/.dsh/dsh-agent-teams/settings.json
 ```
 
 `memberProvider` is the sub-agent runtime backend (`spawn` / `fork`), not an LLM provider. Cross-LLM-provider routing uses the optional `provider` + `model` fields of `agent_teams_add_member`; `memberModel` is only a model default for all members. A member on the captain's current provider/model inherits the captain's reasoning effort, while a changed provider or model automatically uses the target model's default. To request a particular effort, pass the optional `reasoning_effort` field — one of the target model's supported effort ids, or `"default"` to force the model's own default.
 
 `slashCommand: false` disables the deterministic `/agent-teams` activation surfaces (slash command and gesture boundary), leaving the natural-language trigger as the only entry point.
+
+## Sub-agent settings
+
+The **Settings** panel in the left sidebar (triggered from the sidebar foot) opens a **子代理设置** page contributed by the plugin. One interface defines the sub-agent roles — their identity, persona, and model route:
+
+- **Create your own roles**: add any custom role key (e.g. `frontend`) alongside the built-ins (`researcher / engineer / reviewer / qa / designer / security / docs / data / operator`); give it a display name, a persona description that becomes part of the member's system prompt, and its own route. Built-in roles can have their persona and route customized too.
+- **Per-role route**: pick provider / model / reasoning effort per role — e.g. a cheap model with low effort for researchers, a stronger model for engineers. The member's free-form `role` string is matched to the closest configured role (`QA Engineer` → `qa`, `Frontend Engineer` → a custom `frontend` key).
+- **Global default (fallback)**: provider / model / reasoning effort for roles without a match (or leave them to inherit the captain's route).
+- **Per-request output cap**: `memberMaxTokens` bounds each member request's output length.
+- **Team limits**: `maxMembers` and `memberMaxDepth` cap how much parallel work and delegation a team can spend.
+
+Settings are global (not per team or session) and persist to a JSON file — by default `~/.dsh/dsh-agent-teams/settings.json`, or the `settingsFile` config path. Role-matched routes and personas win over the global default, which wins over the static `memberModel` / `memberMaxDepth` / `maxMembers` config; they apply to members spawned afterwards, while existing members keep the route they were created with.
 
 ## Boundaries
 

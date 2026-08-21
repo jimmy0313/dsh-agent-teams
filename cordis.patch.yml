@@ -19,3 +19,7 @@
         stateDir: .agent-teams
         # Provider used to spawn member subagents ('spawn' or 'fork').
         memberProvider: spawn
+        # Optional runtime settings file behind the Web "费用设置" panel
+        # (member model/cost knobs). Defaults to
+        # ~/.dsh/dsh-agent-teams/settings.json.
+        # settingsFile: ~/.dsh/dsh-agent-teams/settings.json
