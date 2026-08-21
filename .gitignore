@@ -5,3 +5,6 @@ lib/
 .agent-teams/
 .pnpm-store/
 .npm-cache/
+# Temporary collaboration-demo artifacts (local only, never committed)
+tests/
+.tmp-test/
