@@ -14,7 +14,6 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { ActivityPanel } from './ActivityPanel.tsx'
 import { AgentTeamsCard, type AgentTeamsCardInjected } from './AgentTeamsCard.tsx'
 import { agentTeamsCardDefinition } from './agent-teams-card-definition.ts'
-import { openAgentTeamMember } from './session-navigation.ts'
 import { SettingsPanel } from './SettingsPanel.tsx'
 import { openAgentTeamMember } from './session-navigation.ts'
 

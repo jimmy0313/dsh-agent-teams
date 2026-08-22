@@ -43,6 +43,13 @@ export interface TeamTask {
   handoffId?: string
   /** A handoff is quiescing the old owner; the scheduler must not dispatch it yet. */
   reassigning?: boolean
+  /**
+   * Marks this task as the team contract (the interface/spec source).
+   * At most one per team; once this task reaches a terminal status the
+   * contract is frozen (terminal results are immutable), so revisions need
+   * a new generation with a revision header and captain approval.
+   */
+  contract?: boolean
   createdAt: number
   updatedAt: number
 }
@@ -66,6 +73,28 @@ export interface TeamMember {
   reasoningEffort?: string
   joinedAt: number
   status: MemberStatus
+}
+
+/**
+ * One binding captain ruling (a decision with precedence over the contract).
+ *
+ * Rulings are issued captain → task owner directly (never relayed through a
+ * third member) and recorded in the team's durable ruling log with a
+ * sequential id (`r1`, `r2`, …). Precedence on conflict: the contract on
+ * disk is the baseline, a ruling overrides it, and the captain's latest
+ * ruling wins.
+ */
+export interface TeamRuling {
+  /** Sequential ruling id inside the team (`r1`, `r2`, …); later = newer. */
+  id: string
+  /** Always the captain. */
+  from: string
+  /** The member name the ruling is addressed to (normally the task owner). */
+  to: string
+  content: string
+  /** Optional task id the ruling concerns. */
+  taskId?: string
+  ts: number
 }
 
 /** One mailbox message. */
@@ -101,4 +130,11 @@ export interface TeamState {
   tasks: TeamTask[]
   /** Monotonic task id counter. */
   taskSeq: number
+  /**
+   * Durable captain ruling log, oldest first (optional: teams created before
+   * the ruling feature simply have none).
+   */
+  rulings?: TeamRuling[]
+  /** Monotonic ruling id counter. */
+  rulingSeq?: number
 }

@@ -44,6 +44,8 @@ export interface TeamActivityTask {
   readonly assignee: string
   readonly dependencies: readonly string[]
   readonly depth: number
+  /** True when this task is the team contract (frozen once terminal). */
+  readonly contract: boolean
 }
 
 /** One captain-inbox preview row. */
@@ -153,6 +155,7 @@ export async function assembleTeamSnapshot(
       assignee: task.assignee ?? '',
       dependencies: task.dependencies,
       depth: depths.get(task.id) ?? 0,
+      contract: task.contract === true,
     })),
     messageCount: captainInbox.length
       + members.reduce((count, member) => count + member.unread, 0),

@@ -59,7 +59,6 @@ import {
 } from '../lib/client/panel-geometry.js'
 import { memberArtUrl } from '../lib/client/artwork.js'
 import { parseAgentTeamsCreateArgs } from '../lib/client/agent-teams-card-definition.js'
-import { openAgentTeamMember } from '../lib/client/session-navigation.js'
 import { shouldAdoptLoadedSettings } from '../lib/client/settings-monitor.js'
 import { openAgentTeamMember } from '../lib/client/session-navigation.js'
 import { steerCaptainReport } from '../lib/tools.js'
@@ -144,10 +143,30 @@ const agentTeamsCardCss = await readFile(new URL('../src/client/AgentTeamsCard.m
 const agentTeamsCardSource = await readFile(new URL('../src/client/AgentTeamsCard.tsx', import.meta.url), 'utf8')
 const artworkSource = await readFile(new URL('../src/client/artwork.ts', import.meta.url), 'utf8')
 const hostSource = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8')
+const membersSource = await readFile(new URL('../src/members.ts', import.meta.url), 'utf8')
+const toolsSource = await readFile(new URL('../src/tools.ts', import.meta.url), 'utf8')
 check(
   'slash command transcript hides the duplicate pre-message result row',
   clientIndexSource.includes('HiddenAgentTeamsCommand')
     && /name:\s*'conversation\.chat\.commandview',\s*key:\s*'agent-teams'/u.test(clientIndexSource),
+)
+check(
+  'protocol advertises the captain-only ruling tool',
+  hostSource.includes('agent_teams_ruling') && toolsSource.includes("name: 'agent_teams_ruling'"),
+)
+check(
+  'members are denied the ruling tool at spawn',
+  membersSource.includes("'agent_teams_ruling'"),
+)
+check(
+  'member persona pins ruling precedence and bans no-information confirmations',
+  membersSource.includes('latest ruling') && membersSource.includes('new information'),
+)
+check(
+  'the create-task tool enforces single-contract and freeze-gate nudges',
+  toolsSource.includes('already has a contract task')
+    && toolsSource.includes('not frozen yet')
+    && toolsSource.includes('contract: true'),
 )
 const expectedArtwork = [
   'team-lead-v2.png',
@@ -421,6 +440,48 @@ try {
   check('archive dir skips live readTeam', await readTeam(stateRoot, 'archive') === undefined)
 } finally {
   await rm(stateRoot, { recursive: true, force: true })
+}
+
+console.log('4b/8 rulings and contract state (temp dir)')
+const rulingsRoot = await mkdtemp(join(tmpdir(), 'dsh-agent-teams-rulings-'))
+try {
+  const { createRuling, writeTeam } = await import('../lib/state.js')
+  const rulingsTeam = {
+    name: 'Rulings',
+    id: sanitizeKey('Rulings'),
+    captainSessionId: 'sess-ruler',
+    createdAt: Date.now(),
+    members: [{ id: 'sess-prober', name: 'prober', joinedAt: Date.now(), status: 'idle' }],
+    tasks: [{
+      id: 't1', subject: 'interface contract', status: 'pending', dependencies: [],
+      contract: true, createdAt: Date.now(), updatedAt: Date.now(),
+    }],
+    taskSeq: 1,
+  }
+  await createTeamDir(rulingsRoot, rulingsTeam)
+  const loaded = await readTeam(rulingsRoot, rulingsTeam.id)
+  check('contract task flag survives the durable boundary', loaded?.tasks[0]?.contract === true)
+
+  const first = createRuling(loaded, CAPTAIN_KEY, 'prober', 'use close code 4400', 't1')
+  const second = createRuling(loaded, CAPTAIN_KEY, 'prober', 'revise: 4400 wins over the contract text')
+  check('rulings get sequential ids and the latest wins by position',
+    first.id === 'r1' && second.id === 'r2'
+      && loaded.rulings?.length === 2
+      && loaded.rulingSeq === 2
+      && loaded.rulings?.[1]?.content.includes('4400'))
+  await writeTeam(rulingsRoot, loaded)
+  const reread = await readTeam(rulingsRoot, rulingsTeam.id)
+  check('ruling log round-trips to disk', reread?.rulings?.length === 2 && reread.rulingSeq === 2)
+
+  const legacy = {
+    name: 'Legacy', id: sanitizeKey('Legacy'), captainSessionId: 'sess-legacy',
+    createdAt: Date.now(), members: [], tasks: [], taskSeq: 0,
+  }
+  await createTeamDir(rulingsRoot, legacy)
+  check('teams created before the ruling feature stay valid without the new fields',
+    (await readTeam(rulingsRoot, legacy.id))?.id === legacy.id)
+} finally {
+  await rm(rulingsRoot, { recursive: true, force: true })
 }
 
 console.log('5/8 host visual-state functions (activity panel)')
@@ -1174,8 +1235,9 @@ try {
       // Archive moves the whole team directory with `rename(source, target)`.
       // The same Windows delete-sharing EPERM applies when a file below the
       // directory is momentarily locked, so it retries the rename. A short
-      // (≈150 ms) lock falls inside the retry window and must not abort the
-      // archive.
+      // lock must fall inside the retry window; the hold is kept well under
+      // the budget because the retries race process-start jitter (a ~140 ms
+      // hold against the ~150 ms window fails most runs on loaded machines).
       const { archiveTeamDir } = await import('../lib/state.js')
       const transientTeam = {
         name: 'Transient Lock Team',
@@ -1194,7 +1256,7 @@ try {
           `$f = '${transientJson.replaceAll("'", "''")}';
            $s = [System.IO.File]::Open($f, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::ReadWrite);
            [Console]::Out.WriteLine('HELD_T'); [Console]::Out.Flush();
-           Start-Sleep -Milliseconds 140; $s.Dispose()`],
+           Start-Sleep -Milliseconds 80; $s.Dispose()`],
         { stdio: ['ignore', 'pipe', 'inherit'] },
       )
       const flashed = await new Promise((resolve, reject) => {
@@ -1217,8 +1279,10 @@ try {
         flasher.on('exit', onExit)
       })
       try {
-        // The flasher releases after ~140 ms; archiveTeamDir retries the
-        // rename across that window, so archiving must still succeed.
+        // The flasher releases after ~80 ms (comfortably inside the rename
+        // retry window even under process-start jitter); the first rename
+        // attempt still fails with the delete-sharing EPERM, so archiving
+        // must succeed through the retry path.
         await archiveTeamDir(atomicStateRoot, transientTeam.id)
         const archived = await readFile(join(atomicStateRoot, 'archive', transientTeam.id, 'team.json'), 'utf8')
         check(

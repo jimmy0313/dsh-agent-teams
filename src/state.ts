@@ -17,7 +17,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { TaskStatus, TeamMember, TeamMessage, TeamState, TeamTask } from './types.ts'
+import type { TaskStatus, TeamMember, TeamMessage, TeamRuling, TeamState, TeamTask } from './types.ts'
 
 /** Mailbox key of the captain. */
 export const CAPTAIN_KEY = 'captain'
@@ -334,6 +334,39 @@ export async function findTeamByParticipant(
 /** Build a fresh message record. */
 export function createMessage(from: string, to: string, content: string): TeamMessage {
   return { id: randomUUID(), from, to, content, ts: Date.now() }
+}
+
+/**
+ * Append one binding captain ruling to the team's durable ruling log and
+ * return it. The id is the next sequential `r<N>` (later = newer), so the
+ * "captain's latest ruling wins" rule is positional: a member applies the
+ * ruling with the highest id that addresses its work.
+ * @param state - the team record (mutated: ruling log + counter).
+ * @param from - always the captain (`CAPTAIN_KEY`).
+ * @param to - the member name the ruling is addressed to.
+ * @param content - the decision itself.
+ * @param taskId - optional task id the ruling concerns.
+ * @returns the created ruling.
+ */
+export function createRuling(
+  state: TeamState,
+  from: string,
+  to: string,
+  content: string,
+  taskId?: string,
+): TeamRuling {
+  const rulingSeq = (state.rulingSeq ?? 0) + 1
+  state.rulingSeq = rulingSeq
+  const ruling: TeamRuling = {
+    id: `r${rulingSeq}`,
+    from,
+    to,
+    content,
+    ts: Date.now(),
+    ...taskId === undefined ? {} : { taskId },
+  }
+  state.rulings = [...(state.rulings ?? []), ruling]
+  return ruling
 }
 
 /**
@@ -663,6 +696,7 @@ function isTeamTask(value: unknown): value is TeamTask {
     && isOptionalString(value['attemptId'])
     && isOptionalString(value['handoffId'])
     && (value['reassigning'] === undefined || typeof value['reassigning'] === 'boolean')
+    && (value['contract'] === undefined || typeof value['contract'] === 'boolean')
     && isFiniteNumber(value['createdAt'])
     && isFiniteNumber(value['updatedAt'])
 }
@@ -683,6 +717,10 @@ function isTeamState(value: unknown, expectedId: string): value is TeamState {
     && value['tasks'].every(isTeamTask)
     && Number.isSafeInteger(value['taskSeq'])
     && (value['taskSeq'] as number) >= 0
+    && (value['rulings'] === undefined
+      || (Array.isArray(value['rulings']) && value['rulings'].every(isTeamRuling)))
+    && (value['rulingSeq'] === undefined
+      || (Number.isSafeInteger(value['rulingSeq']) && (value['rulingSeq'] as number) >= 0))
   if (!validShape) return false
 
   const members = value['members'] as TeamMember[]
@@ -703,7 +741,7 @@ function isTeamState(value: unknown, expectedId: string): value is TeamState {
   return true
 }
 
-/** Validate a mailbox record so later rendering cannot crash on `{}`/`null`. */
+/** Validate one mailbox record so later rendering cannot crash on `{}`/`null`. */
 function isTeamMessage(value: unknown): value is TeamMessage {
   if (!isRecord(value)) return false
   return typeof value['id'] === 'string'
@@ -714,6 +752,18 @@ function isTeamMessage(value: unknown): value is TeamMessage {
     && (value['deliveryClaimedAt'] === undefined || isFiniteNumber(value['deliveryClaimedAt']))
     && (value['deliveredAt'] === undefined || isFiniteNumber(value['deliveredAt']))
     && (value['readAt'] === undefined || isFiniteNumber(value['readAt']))
+}
+
+/** Validate one captain ruling record at the durable JSON boundary. */
+function isTeamRuling(value: unknown): value is TeamRuling {
+  if (!isRecord(value)) return false
+  return typeof value['id'] === 'string'
+    && value['id'].trim() !== ''
+    && typeof value['from'] === 'string'
+    && typeof value['to'] === 'string'
+    && typeof value['content'] === 'string'
+    && isOptionalString(value['taskId'])
+    && isFiniteNumber(value['ts'])
 }
 
 /**

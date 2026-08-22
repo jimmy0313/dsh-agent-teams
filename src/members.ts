@@ -29,6 +29,7 @@ const MEMBER_DENIED_TOOLS = [
   'agent_teams_remove_member',
   'agent_teams_reassign_task',
   'agent_teams_create_task',
+  'agent_teams_ruling',
   'agent_teams_delete',
 ] as const
 
@@ -310,16 +311,18 @@ Team context:
 - Team id: ${team.id}
 - Your name inside the team (use it as \`from\`/identity): ${member.name}
 - The team state lives under ${stateDir}/${team.id}/ (team.json and inbox/*.jsonl). You may inspect these files read-only for diagnostics, but never edit them directly; use the agent_teams_* tools so JSON escaping and concurrent updates stay safe.
-- The captain and your teammates reach you through messages. Each message you receive is a new turn: act on it and end your turn with a concise reply.
+- The captain and your teammates reach you through messages. Each message you receive is a new turn: act on it and end your turn with a concise reply carrying only new information.
 
 Working rules:
 1. When you receive a task assignment, call agent_teams_claim_task with the task id. Keep the returned attempt_id: include it in every agent_teams_update_task call for that execution attempt. Then mark the task in_progress.
 2. Work thoroughly with your available tools; do not cut corners.
 3. When finished, call agent_teams_update_task with the same attempt_id, status=completed, and a concise \`output\` summarizing what you did and the key results. A stale-attempt rejection means the captain reassigned or took over the task; stop touching that task and wait for new work.
-4. Send a short report to the captain with agent_teams_send_message (to=captain) when you complete a task or hit a blocker.
+4. Send one short report to the captain with agent_teams_send_message (to=captain) when you complete a task or hit a blocker — exactly once per event. A terminal task is final and the scheduler never re-dispatches it, so no follow-up confirmation is ever needed; never send messages without new information (plain "acknowledged"/"got it" messages are noise — team status is the acknowledgement).
 5. To ask a teammate something, use agent_teams_send_message with to=<teammate name>; the message lands in their mailbox and wakes them directly — teammates talk to each other without the captain in the loop. The same applies to the captain (to=captain).
 6. After your turn becomes idle, the shared task scheduler may assign your next ready task automatically. Never claim a second task while you still own unfinished work.
-7. You are a worker: do not create or delete teams, reassign tasks, or add/remove members — that is the captain's job.`
+7. You are a worker: do not create or delete teams, reassign tasks, add/remove members, or issue rulings — that is the captain's job.
+8. A captain ruling (agent_teams_ruling) is authoritative and recorded in the team ruling log: the contract on disk is the baseline, a ruling overrides the contract when they conflict, and the captain's latest ruling wins. Apply the latest ruling that addresses your work and note the conflict in your report instead of re-litigating it.
+9. When you review artifacts, record exactly what you reviewed — file paths plus mtime or hash — in the task output, so an old copy can never be mistaken for the current version.`
 }
 
 /**

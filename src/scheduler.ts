@@ -26,7 +26,7 @@ import {
   withTeamLock,
   writeTeam,
 } from './state.ts'
-import type { TeamMember, TeamTask } from './types.ts'
+import { TERMINAL_TASK_STATUSES, type TeamMember, type TeamTask } from './types.ts'
 
 export interface SchedulerConfig {
   readonly stateDir: string
@@ -69,11 +69,20 @@ function isMemberAvailable(ctx: Context, member: TeamMember): boolean {
 }
 
 function ownedOpenTask(tasks: readonly TeamTask[], memberName: string): TeamTask | undefined {
+  // Terminal tasks (completed/failed/cancelled) are final and immutable: they
+  // are never owned-open, never retried by the scheduler, and never handed to
+  // another member. The explicit guard keeps that invariant even if a
+  // malformed record carries a terminal status next to a stale assignee.
   return tasks.find(task => task.assignee === memberName
+    && !TERMINAL_TASK_STATUSES.includes(task.status)
     && (task.status === 'claimed' || task.status === 'in_progress'))
 }
 
 function nextReadyTask(tasks: readonly TeamTask[], memberName: string): TeamTask | undefined {
+  // Only `pending` tasks are dispatchable; terminal tasks are excluded by
+  // status here too, so an idle member can never be re-dispatched a task
+  // that already reached a terminal state (retry only happens through the
+  // captain's explicit agent_teams_reassign_task).
   const ready = tasks.filter(task => task.status === 'pending'
     && task.reassigning !== true
     && unsatisfiedDependencies([...tasks], task.dependencies).length === 0)

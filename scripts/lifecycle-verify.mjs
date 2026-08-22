@@ -485,6 +485,77 @@ try {
   check('same-name team can be recreated and archived again',
     await readTeam(stateRoot, teamId) === undefined
       && replacementArchive?.description === 'second generation')
+
+  // ── retrospective probe: contract freeze, direct rulings, terminal finality ──
+  await call('agent_teams_create', { name: 'Ruling Probe', description: 'contract/ruling/finality probes' })
+  const probeTeamId = 'ruling-probe'
+  const probeState = () => readTeam(stateRoot, probeTeamId)
+  const probeTask = async id => (await probeState())?.tasks.find(candidate => candidate.id === id)
+
+  const contractCreated = await call('agent_teams_create_task', { subject: 'interface contract', contract: true })
+  const contractRecord = await probeTask(contractCreated.task_id)
+  check('contract task is marked on the durable record', contractRecord?.contract === true)
+  let duplicateContractRejected = false
+  try {
+    await call('agent_teams_create_task', { subject: 'second contract', contract: true })
+  } catch (error) {
+    duplicateContractRejected = /already has a contract task/.test(String(error))
+  }
+  check('a second contract task is rejected (single owner)', duplicateContractRejected)
+  const gatedProbe = await call('agent_teams_create_task', { subject: 'implementation probe' })
+  check('an unfrozen contract nudges implementation tasks to gate on the review',
+    typeof gatedProbe.warning === 'string' && gatedProbe.warning.includes(contractCreated.task_id))
+  await call('agent_teams_reassign_task', { task_id: contractCreated.task_id, assignee: 'captain', reason: 'author the contract' })
+  await call('agent_teams_update_task', { task_id: contractCreated.task_id, status: 'in_progress' })
+  await call('agent_teams_update_task', { task_id: contractCreated.task_id, status: 'completed', output: 'contract v1 frozen' })
+  const postFreezeProbe = await call('agent_teams_create_task', { subject: 'post-freeze task' })
+  check('a frozen contract stops nudging', postFreezeProbe.warning === undefined)
+
+  const probeMember = await call('agent_teams_add_member', { name: 'prober', role: 'reviewer' })
+  const prober = liveAgents.get(probeMember.member_id)
+  const ruling = await call('agent_teams_ruling', {
+    to: 'prober', content: 'use close code 4400; overrides contract v1', task_id: gatedProbe.task_id,
+  })
+  const rulingTeam = await probeState()
+  check('a ruling is recorded, ordered, and delivered directly to the owner',
+    ruling.ruling_id === 'r1' && ruling.delivered === 'wake'
+      && rulingTeam?.rulings?.[0]?.taskId === gatedProbe.task_id
+      && deliveries.some(delivery => delivery.childId === prober.id
+        && (delivery.content?.[0]?.text ?? '').includes('Authoritative ruling')))
+  let memberRulingRejected = false
+  try {
+    await call('agent_teams_ruling', { to: 'prober', content: 'member pretending to rule' }, prober)
+  } catch (error) {
+    memberRulingRejected = /only the captain/.test(String(error))
+  }
+  check('only the captain can issue rulings', memberRulingRejected)
+  const probeStatus = await call('agent_teams_status', {})
+  check('status exposes the ruling log and the contract task',
+    probeStatus.rulings?.some(entry => entry.id === 'r1')
+      && probeStatus.contract_task_id === contractCreated.task_id)
+
+  // Close the leftover pending probe tasks so the finality check below sees
+  // an empty ready pool (an idle member must then receive no dispatch at all).
+  for (const pendingId of [gatedProbe.task_id, postFreezeProbe.task_id]) {
+    await call('agent_teams_reassign_task', { task_id: pendingId, assignee: 'captain', reason: 'close probe task' })
+    await call('agent_teams_update_task', { task_id: pendingId, status: 'in_progress' })
+    await call('agent_teams_update_task', { task_id: pendingId, status: 'completed', output: 'closed' })
+  }
+
+  const finalTask = await call('agent_teams_create_task', { subject: 'finality probe', assignee: 'prober' })
+  const finalClaim = await call('agent_teams_claim_task', { task_id: finalTask.task_id }, prober)
+  await call('agent_teams_update_task', { task_id: finalTask.task_id, status: 'in_progress', attempt_id: finalClaim.attempt_id }, prober)
+  await call('agent_teams_update_task', { task_id: finalTask.task_id, status: 'completed', output: 'done', attempt_id: finalClaim.attempt_id }, prober)
+  const deliveriesBeforeIdle = deliveries.length
+  publishStatus(prober, 'idle')
+  await new Promise(resolve => setTimeout(resolve, 30))
+  const finalRecord = await probeTask(finalTask.task_id)
+  check('an idle member is never re-dispatched a terminal task',
+    finalRecord?.status === 'completed'
+      && finalRecord.assignee === 'prober'
+      && deliveries.length === deliveriesBeforeIdle)
+
+  await call('agent_teams_delete', {})
 } finally {
   await rm(workspace, { recursive: true, force: true })
 }

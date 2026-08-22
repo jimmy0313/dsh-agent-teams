@@ -24,6 +24,7 @@ import {
   beginTaskAttempt,
   CAPTAIN_KEY,
   createMessage,
+  createRuling,
   createTeamDir,
   findTeamByCaptain,
   findTeamByParticipant,
@@ -114,6 +115,10 @@ function captainLockKey(stateRoot: string, captainId: string): string {
 async function requireCaptainTeam(workspace: string, config: ToolsConfig, captain: Agent): Promise<TeamState> {
   const team = await findTeamByCaptain(stateRootOf(workspace, config), captain.id)
   if (team === undefined) {
+    const participant = await findTeamByParticipant(stateRootOf(workspace, config), captain.id)
+    if (participant !== undefined) {
+      throw new Error(`only the captain of team "${participant.name}" may perform this operation`)
+    }
     throw new Error('you are not leading any team yet — call agent_teams_create first')
   }
   return team
@@ -486,7 +491,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): void
 
   ctx.tools.register(defineTool({
     name: 'agent_teams_create_task',
-    description: 'Create a task in your team\'s task list. Tasks can depend on other tasks (dependencies): a task is only claimable once every dependency is completed. Optionally assign it to a member, who still claims it before working.',
+    description: 'Create a task in your team\'s task list. Tasks can depend on other tasks (dependencies): a task is only claimable once every dependency is completed. Optionally assign it to a member, who still claims it before working. Mark exactly one task with contract=true to declare the team contract (interface/spec source): once that task reaches a terminal status the contract is frozen, and interface-implementing tasks must depend on the contract review gate so the scheduler cannot claim them early.',
     parameters: {
       subject: { type: 'string', required: true, description: 'Brief title for the task.' },
       description: { type: 'string', description: 'What needs to be done, in detail.' },
@@ -496,6 +501,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): void
         description: 'Task ids this task depends on (must be completed before this task can be claimed).',
       },
       assignee: { type: 'string', description: 'Optional member name this task is intended for.' },
+      contract: { type: 'boolean', description: 'Mark this task as the team contract. At most one per team; the contract is frozen once this task is terminal. Implementation tasks that follow must depend on the contract review gate.' },
     },
     output: {
       schema: {
@@ -506,11 +512,13 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): void
           subject: { type: 'string', required: true },
           status: { type: 'string', required: true },
           assignee: { type: 'string' },
+          contract: { type: 'boolean', required: true },
+          warning: { type: 'string' },
         },
       },
       render: (args, value) => [{
         type: 'text',
-        text: `Task "${value.subject}" created as ${value.task_id} (status ${value.status}${value.assignee ? `, assigned to ${value.assignee}` : ''}).`,
+        text: `Task "${value.subject}" created as ${value.task_id} (status ${value.status}${value.contract ? ', CONTRACT' : ''}${value.assignee ? `, assigned to ${value.assignee}` : ''})${value.warning === undefined ? '' : `\nWarning: ${value.warning}`}`,
       }],
     },
     async execute(args, exec) {
@@ -527,6 +535,11 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): void
           }
         }
         if (args.assignee !== undefined) requireMember(fresh, args.assignee)
+        const contract = args.contract === true
+        const existingContract = fresh.tasks.find((task) => task.contract === true)
+        if (contract && existingContract !== undefined) {
+          throw new Error(`team "${fresh.name}" already has a contract task ${existingContract.id} — the contract has a single owner`)
+        }
         const task: TeamTask = {
           id: `t${fresh.taskSeq + 1}`,
           subject: args.subject,
@@ -534,12 +547,24 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): void
           status: 'pending',
           assignee: args.assignee,
           dependencies,
+          ...contract ? { contract: true } : {},
           attempt: 0,
           createdAt: Date.now(),
           updatedAt: Date.now(),
         }
         fresh.taskSeq += 1
         fresh.tasks.push(task)
+        // Freeze-gate nudge: while the team contract is unfrozen, remind the
+        // captain to gate interface work on the contract review (the review
+        // gate task depends on the contract task; implementations depend on
+        // the review gate). A nudge, not a hard block — non-interface work
+        // legitimately runs in parallel with the contract authoring.
+        let warning: string | undefined
+        if (!contract && existingContract !== undefined
+          && !TERMINAL_TASK_STATUSES.includes(existingContract.status)
+          && !dependencies.includes(existingContract.id)) {
+          warning = `team contract ${existingContract.id} is not frozen yet — if this task implements the contract interface, add a dependency on the contract review gate so the scheduler cannot claim it early`
+        }
         await writeTeam(stateRoot, fresh)
         appendTeamEvent(ctx, captainSessionOf(ctx, fresh.captainSessionId, captain.session), 'agent-teams/task-created', {
           teamId: fresh.id,
@@ -552,7 +577,9 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): void
           task_id: task.id,
           subject: task.subject,
           status: task.status,
+          contract,
           ...task.assignee !== undefined ? { assignee: task.assignee } : {},
+          ...warning === undefined ? {} : { warning },
         }
       })
       await scheduler.kickTeam(workspace, team.id, captain)
@@ -965,6 +992,88 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): void
   }))
 
   ctx.tools.register(defineTool({
+    name: 'agent_teams_ruling',
+    description: 'Issue a binding captain ruling directly to one member (normally the task owner). Captain-only. The ruling is recorded in the team ruling log and delivered to the member as its next turn. Never relay a ruling through a third member. Precedence on conflict: the contract on disk is the baseline, a ruling overrides it, and the captain\'s latest ruling wins.',
+    parameters: {
+      to: { type: 'string', required: true, description: 'Active member name that owns the work the ruling concerns.' },
+      content: { type: 'string', required: true, description: 'The decision itself: what to do, and which earlier contract text or ruling it changes if any.' },
+      task_id: { type: 'string', description: 'Optional task id the ruling concerns, recorded in the ruling log.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ruling_id: { type: 'string', required: true },
+          from: { type: 'string', required: true },
+          to: { type: 'string', required: true },
+          task_id: { type: 'string' },
+          delivered: { type: 'string', required: true, description: 'wake (member woken) or mailbox (durable inbox only).' },
+        },
+      },
+      render: (args, value) => [{
+        type: 'text',
+        text: `Ruling ${value.ruling_id} ${value.from} → ${value.to}${value.task_id === undefined ? '' : ` (task ${value.task_id})`} delivered via ${value.delivered}.`,
+      }],
+    },
+    async execute(args, exec) {
+      const captain = requireCaptain(exec)
+      const workspace = workspaceOf(captain)
+      const stateRoot = stateRootOf(workspace, config)
+      const team = await requireCaptainTeam(workspace, config, captain)
+      const prepared = await withTeamLock(teamLockKey(stateRoot, team.id), async () => {
+        const fresh = await requireFreshCaptainTeam(stateRoot, team.id, captain.id)
+        if (args.task_id !== undefined) requireTask(fresh, args.task_id)
+        const recipient = requireMember(fresh, args.to)
+        const ruling = createRuling(fresh, CAPTAIN_KEY, recipient.name, args.content, args.task_id)
+        // Durable mailbox copy mirrors send_message: raw content persisted,
+        // the authoritative preamble is added at live delivery time.
+        const message = {
+          ...createMessage(CAPTAIN_KEY, recipient.name, args.content),
+          deliveryClaimedAt: Date.now(),
+        }
+        await appendMailbox(stateRoot, fresh.id, recipient.name, message)
+        await writeTeam(stateRoot, fresh)
+        appendTeamEvent(ctx, captainSessionOf(ctx, fresh.captainSessionId, captain.session), 'agent-teams/message-sent', {
+          teamId: fresh.id,
+          messageId: message.id,
+          from: CAPTAIN_KEY,
+          to: recipient.name,
+          content: `[RULING ${ruling.id}] ${args.content}`,
+          ts: message.ts,
+        })
+        return { fresh, recipient, ruling, message }
+      })
+
+      // Resolve the exact live captain only after releasing the state lock.
+      const liveCaptain = ctx.agents.get(prepared.fresh.captainSessionId as SessionId)
+      let delivered: 'wake' | 'mailbox' = 'mailbox'
+      if (liveCaptain !== undefined && prepared.recipient.id !== '') {
+        const text = `Authoritative ruling from the captain (${prepared.ruling.id})${prepared.ruling.taskId === undefined ? '' : ` for task ${prepared.ruling.taskId}`}:\n\n${args.content}\n\nThis ruling is recorded in the team ruling log. It overrides the contract text where they conflict; apply the captain's latest ruling.`
+        const accepted = await deliverToMember(ctx, liveCaptain, prepared.recipient.id, text, exec.signal)
+        delivered = accepted ? 'wake' : 'mailbox'
+        if (accepted) {
+          await withTeamLock(teamLockKey(stateRoot, prepared.fresh.id), () => (
+            acknowledgeMailbox(stateRoot, prepared.fresh.id, prepared.recipient.name, [prepared.message.id])
+          ))
+        }
+      }
+      if (delivered === 'mailbox') {
+        await withTeamLock(teamLockKey(stateRoot, prepared.fresh.id), () => (
+          releaseMailboxDelivery(stateRoot, prepared.fresh.id, prepared.recipient.name, [prepared.message.id])
+        ))
+      }
+      return {
+        ruling_id: prepared.ruling.id,
+        from: CAPTAIN_KEY,
+        to: prepared.recipient.name,
+        ...prepared.ruling.taskId === undefined ? {} : { task_id: prepared.ruling.taskId },
+        delivered,
+      }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'agent_teams_status',
     description: 'Team snapshot: members with live activity and tasks with status/assignee/dependencies/output. Captains also see every team mailbox; members see only their own inbox. Poll this to watch progress.',
     parameters: {},
@@ -1005,8 +1114,10 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): void
         attempt: task.attempt ?? 0,
         attempt_id: task.attemptId ?? '',
         reassigning: task.reassigning === true,
+        contract: task.contract === true,
         ...task.output !== undefined ? { output: task.output } : {},
       }))
+      const contractTask = team.tasks.find((task) => task.contract === true)
       const mailboxWarnings: string[] = []
       let mailboxWarningCount = 0
       const reportMalformed = (agentKey: string) => (lineNumber: number): void => {
@@ -1043,6 +1154,15 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): void
         viewer: identity.name,
         members,
         tasks,
+        rulings: (team.rulings ?? []).slice(-10).map((ruling) => ({
+          id: ruling.id,
+          from: ruling.from,
+          to: ruling.to,
+          ...ruling.taskId === undefined ? {} : { task_id: ruling.taskId },
+          content: ruling.content,
+          ts: ruling.ts,
+        })),
+        ...contractTask === undefined ? {} : { contract_task_id: contractTask.id },
         captain_inbox: captainInbox.slice(-10).map((message) => ({
           from: message.from,
           content: message.content,
@@ -1141,6 +1261,7 @@ function renderStatus(value: JsonValue): string {
     team_name: string
     description?: string
     viewer: string
+    contract_task_id?: string
     members: {
       name: string
       role: string
@@ -1150,7 +1271,8 @@ function renderStatus(value: JsonValue): string {
       status: string
       activity: string
     }[]
-    tasks: { id: string; subject: string; status: string; assignee: string; dependencies: string[]; attempt: number; attempt_id: string; reassigning: boolean; output?: string }[]
+    tasks: { id: string; subject: string; status: string; assignee: string; dependencies: string[]; attempt: number; attempt_id: string; reassigning: boolean; contract: boolean; output?: string }[]
+    rulings: { id: string; from: string; to: string; task_id?: string; content: string; ts: number }[]
     captain_inbox: { from: string; content: string }[]
     member_inboxes: Record<string, { count: number; latest: string }>
     mailbox_warnings: string[]
@@ -1158,6 +1280,7 @@ function renderStatus(value: JsonValue): string {
   }
   const lines: string[] = [
     `Team "${team.team_name}"${team.description ? ` — ${team.description}` : ''}`,
+    ...team.contract_task_id === undefined ? [] : [`Contract: ${team.contract_task_id} (frozen once terminal)`],
     `Viewing as: ${team.viewer}`,
     `Members (${team.members.length}):`,
     ...team.members.map((member) => {
@@ -1170,8 +1293,16 @@ function renderStatus(value: JsonValue): string {
       const deps = task.dependencies.length > 0 ? ` (deps: ${task.dependencies.join(',')})` : ''
       const output = task.output !== undefined ? `\n      output: ${task.output.slice(0, 300)}` : ''
       const handoff = task.reassigning ? ' (reassigning)' : ''
-      return `  - ${task.id} [${task.status}] attempt ${task.attempt}${handoff} ${task.subject} → ${task.assignee || 'unassigned'}${deps}${output}`
+      const contract = task.contract ? ' [CONTRACT]' : ''
+      return `  - ${task.id} [${task.status}${contract}] attempt ${task.attempt}${handoff} ${task.subject} → ${task.assignee || 'unassigned'}${deps}${output}`
     }),
+    ...(team.rulings !== undefined && team.rulings.length > 0
+      ? [
+          `Rulings (${team.rulings.length}):`,
+          ...team.rulings.slice(-5).map((ruling) =>
+            `  - ${ruling.id} ${ruling.from} → ${ruling.to}${ruling.task_id === undefined ? '' : ` (${ruling.task_id})`}: ${ruling.content.slice(0, 200)}`),
+        ]
+      : []),
     `Captain inbox (${team.captain_inbox.length}):`,
     ...team.captain_inbox.map((message) => `  - [${message.from}] ${message.content.slice(0, 200)}`),
   ]
